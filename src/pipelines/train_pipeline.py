@@ -64,85 +64,87 @@ def make_splits(df: pd.DataFrame, test_size: float = 0.2, val_ratio_from_train: 
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 @task(name="Preprocessor")
-def preprocessor(
-    X_train: pd.DataFrame,
-    X_test: pd.DataFrame,
-    X_val: Optional[pd.DataFrame] = None,
-    save_data: bool = False,
-    save_artifacts: bool = True,
-    artifacts_dir: str = "../artifacts/preprocessor"
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], OneHotEncoder, StandardScaler, List[str]]:
-
+def preprocessor(X_train, X_test, X_val=None, save_artifacts=True):
+    # Make copies so we don't mutate outside variables
     X_train = X_train.copy()
-    X_test = X_test.copy()
-    X_val = X_val.copy() if X_val is not None else None
+    X_test  = X_test.copy()
+    X_val   = X_val.copy() if X_val is not None else None
 
-    # Imputación simple
+    # 1) Impute missing values
+    # Fill pets_allowed with 0 (assumption: NaN => no pets allowed)
     if 'pets_allowed' in X_train.columns:
-        for df in [X_train, X_test] + ([X_val] if X_val is not None else []):
-            df['pets_allowed'] = df['pets_allowed'].fillna(0)
+        X_train['pets_allowed'] = X_train['pets_allowed'].fillna(0)
+        X_test['pets_allowed']  = X_test['pets_allowed'].fillna(0)
+        if X_val is not None:
+            X_val['pets_allowed'] = X_val['pets_allowed'].fillna(0)
 
+    # For other numeric columns use train median
     numeric_cols = ['bathrooms', 'bedrooms', 'square_feet', 'latitude', 'longitude', 'amenities_count']
     for col in numeric_cols:
         if col in X_train.columns:
             med = X_train[col].median()
-            for df in [X_train, X_test] + ([X_val] if X_val is not None else []):
-                df[col] = df[col].fillna(med)
+            X_train[col] = X_train[col].fillna(med)
+            X_test[col]  = X_test[col].fillna(med)
+            if X_val is not None:
+                X_val[col] = X_val[col].fillna(med)
 
-    # One-hot encode
+    # 2) One-Hot encode cityname and state together
     cat_cols = [c for c in ["category", "has_photo", "pets_allowed", "cityname", "state"] if c in X_train.columns]
     encoder = OneHotEncoder(drop='first', handle_unknown='ignore', sparse_output=False)
     if len(cat_cols) > 0:
         encoder.fit(X_train[cat_cols])
+
         X_train_cat = encoder.transform(X_train[cat_cols])
         X_test_cat  = encoder.transform(X_test[cat_cols])
         X_val_cat   = encoder.transform(X_val[cat_cols]) if X_val is not None else None
+
         cat_feature_names = encoder.get_feature_names_out(cat_cols)
 
         X_train_cat_df = pd.DataFrame(X_train_cat, columns=cat_feature_names, index=X_train.index)
         X_test_cat_df  = pd.DataFrame(X_test_cat,  columns=cat_feature_names, index=X_test.index)
         X_val_cat_df   = pd.DataFrame(X_val_cat,   columns=cat_feature_names, index=X_val.index) if X_val is not None else None
 
-        for df in [X_train, X_test] + ([X_val] if X_val is not None else []):
-            df.drop(columns=cat_cols, inplace=True)
+        # drop original cat cols and concat encoded
+        X_train = X_train.drop(columns=cat_cols)
+        X_test  = X_test.drop(columns=cat_cols)
+        X_val   = X_val.drop(columns=cat_cols) if X_val is not None else None
 
         X_train_final = pd.concat([X_train, X_train_cat_df], axis=1)
         X_test_final  = pd.concat([X_test,  X_test_cat_df],  axis=1)
         X_val_final   = pd.concat([X_val,   X_val_cat_df],   axis=1) if X_val is not None else None
     else:
+        # no categorical cols found
         X_train_final = X_train
         X_test_final  = X_test
         X_val_final   = X_val
 
-    # Escalado
+    # 3) Scale (fit on train only)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_final)
     X_test_scaled  = scaler.transform(X_test_final)
     X_val_scaled   = scaler.transform(X_val_final) if X_val is not None else None
 
-    # Guardar artefactos
-    if save_artifacts:
-        os.makedirs(artifacts_dir, exist_ok=True)
-        with open(os.path.join(artifacts_dir, "encoder.pkl"), 'wb') as f:
-            pickle.dump(encoder, f)
-        with open(os.path.join(artifacts_dir, "scaler.pkl"), 'wb') as f:
-            pickle.dump(scaler, f)
-        try:
-            mlflow.log_artifact(os.path.join(artifacts_dir, "encoder.pkl"), artifact_path="preprocessor")
-            mlflow.log_artifact(os.path.join(artifacts_dir, "scaler.pkl"), artifact_path="preprocessor")
-        except Exception as e:
-            print("MLflow artifact logging skipped/failed:", e)
+    feature_cols = list(X_train_final.columns)
 
+    # 5) Save artifacts
+    if save_artifacts:
+        os.makedirs("artifacts/preprocessor", exist_ok=True)
+        with open('artifacts/preprocessor/encoder.pkl', 'wb') as f_out:
+            pickle.dump(encoder, f_out)
+        with open('artifacts/preprocessor/scaler.pkl', 'wb') as f_out:
+            pickle.dump(scaler, f_out)
+        with open('artifacts/preprocessor/feature_columns.pkl', 'wb') as f_out:
+            pickle.dump(feature_cols, f_out)
+
+
+    # Return scaled arrays + artifacts + feature names so user can reconstruct dfs
     return X_train_scaled, X_test_scaled, X_val_scaled, encoder, scaler, list(X_train_final.columns)
 
 # ---- HYPERPARAM TUNING ----
 
 @task(name="HP Tuning RF")
-def hp_tuning_rf(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_trials=10):
-    mlflow.sklearn.autolog()
-    sampler = TPESampler(seed=42)
-
-    def objective(trial):
+def hp_tuning_rf_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=None, y_val=None, n_trials=5):
+    def objective_rf(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
             "max_depth": trial.suggest_int("max_depth", 3, 30),
@@ -152,27 +154,45 @@ def hp_tuning_rf(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_tri
             "n_jobs": -1
         }
 
-        X_train_scaled, X_test_scaled, X_val_scaled, _, _, _ = preprocessor(X_train, X_test, X_val)
+        with mlflow.start_run(nested=True):
 
-        eval_X = X_val_scaled if (X_val is not None and y_val is not None) else X_test_scaled
-        eval_y = y_val if (X_val is not None and y_val is not None) else y_test
+            mlflow.set_tag("model_family", "random_forest_regressor")
+            mlflow.log_params(params)
+            mlflow.set_tags({'best': 'true'})
 
-        model = RandomForestRegressor(**params)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(eval_X)
-        return float(np.sqrt(mean_squared_error(eval_y, y_pred)))
+            mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
+            
+            model = RandomForestRegressor(**params)
+            model.fit(X_train_scaled, y_train)
 
+            y_pred = model.predict(X_test_scaled)
+
+            rms = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+            mae = float(mean_absolute_error(y_test, y_pred))
+            r2 = float(r2_score(y_test, y_pred))
+
+            mlflow.log_metric("rmse", rms)
+            mlflow.log_metric("mae", mae)
+            mlflow.log_metric("r2", r2)
+
+            signature = infer_signature(X_test_scaled, y_pred)
+            mlflow.sklearn.log_model(model, artifact_path="rf_regressor", signature=signature)
+
+        return rms  # Optuna will minimize RMSE
+
+    sampler = TPESampler(seed=42)
     study = optuna.create_study(direction="minimize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    with mlflow.start_run(run_name="RF Regression (Optuna)", nested=True):
+        study.optimize(objective_rf, n_trials=n_trials)
+
     return study.best_params
 
 # --- HP Tuning XGB ---
 @task(name="HP Tuning XGB")
-def hp_tuning_xgb(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_trials=10):
-    mlflow.xgboost.autolog()
-    sampler = TPESampler(seed=42)
-
-    def objective(trial):
+def hp_tuning_xgb_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=None, y_val=None, n_trials=5):
+    def objective_xgb(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 300, 2000),
             "max_depth": trial.suggest_int("max_depth", 3, 20),
@@ -183,25 +203,45 @@ def hp_tuning_xgb(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_tr
             "n_jobs": -1
         }
 
-        X_train_scaled, X_test_scaled, X_val_scaled, _, _, _ = preprocessor(X_train, X_test, X_val)
-        eval_X = X_val_scaled if (X_val is not None and y_val is not None) else X_test_scaled
-        eval_y = y_val if (X_val is not None and y_val is not None) else y_test
+        with mlflow.start_run(nested=True):
 
-        model = xgb.XGBRegressor(objective='reg:squarederror', **params)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(eval_X)
-        return float(np.sqrt(mean_squared_error(eval_y, y_pred)))
+            mlflow.set_tag("model_family", "xgboost_regressor")
+            mlflow.log_params(params)
+            mlflow.set_tags({'best': 'true'})
+            
+            mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
 
+            model = xgb.XGBRegressor(**params)
+            model.fit(X_train_scaled, y_train)
+
+            y_pred = model.predict(X_test_scaled)
+
+            rms = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+            mae = float(mean_absolute_error(y_test, y_pred))
+            r2 = float(r2_score(y_test, y_pred))
+
+            mlflow.log_metric("rmse", rms)
+            mlflow.log_metric("mae", mae)
+            mlflow.log_metric("r2", r2)
+
+            signature = infer_signature(X_test_scaled, y_pred)
+            mlflow.xgboost.log_model(model, artifact_path="xgb_regressor", signature=signature)
+
+        return rms
+
+    sampler = TPESampler(seed=42)
     study = optuna.create_study(direction="minimize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    with mlflow.start_run(run_name="XGB Regression (Optuna)", nested=True):
+        study.optimize(objective_xgb, n_trials=n_trials)
+
     return study.best_params
 
 # --- HP Tuning LGBM ---
 @task(name="HP Tuning LGBM")
-def hp_tuning_lgbm(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_trials=10):
-    sampler = TPESampler(seed=42)
-
-    def objective(trial):
+def hp_tuning_lgbm_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=None, y_val=None, n_trials=5):
+    def objective_lgbm(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
             "max_depth": trial.suggest_int("max_depth", -1, 20),
@@ -213,69 +253,141 @@ def hp_tuning_lgbm(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_t
             "n_jobs": -1
         }
 
-        X_train_scaled, X_test_scaled, X_val_scaled, _, _, _ = preprocessor(X_train, X_test, X_val)
-        eval_X = X_val_scaled if (X_val is not None and y_val is not None) else X_test_scaled
-        eval_y = y_val if (X_val is not None and y_val is not None) else y_test
+        with mlflow.start_run(nested=True):
+            mlflow.set_tag("model_family", "lightgbm_regressor")
+            mlflow.log_params(params)
+            mlflow.set_tags({'best': 'true'})
+            
+            mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+            mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
 
-        model = lgb.LGBMRegressor(**params)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(eval_X)
-        return float(np.sqrt(mean_squared_error(eval_y, y_pred)))
+            model = lgb.LGBMRegressor(**params)
+            model.fit(X_train_scaled, y_train)
 
+            y_pred = model.predict(X_test_scaled)
+
+            rms = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+            mae = float(mean_absolute_error(y_test, y_pred))
+            r2 = float(r2_score(y_test, y_pred))
+
+            mlflow.log_metric("rmse", rms)
+            mlflow.log_metric("mae", mae)
+            mlflow.log_metric("r2", r2)
+
+            signature = infer_signature(X_test_scaled, y_pred)
+            mlflow.lightgbm.log_model(model, artifact_path="lgbm_regressor", signature=signature)
+
+        return rms
+
+    sampler = TPESampler(seed=42)
     study = optuna.create_study(direction="minimize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    with mlflow.start_run(run_name="LightGBM Regression (Optuna)", nested=True):
+        study.optimize(objective_lgbm, n_trials=n_trials)
+
     return study.best_params
 
 
 # --- TRAIN BEST MODELS ---
 @task(name="Train Best Models")
 def train_best_models(
-    X_train, y_train, X_test, y_test,
-    best_params_rf, best_params_xgb, best_params_lgbm
+    X_train_scaled, y_train,
+    X_test_scaled, y_test,
+    best_params_rf,
+    best_params_xgb,
+    best_params_lgbm
 ):
-    mlflow.end_run()
-    run_ids = {}
+    # 0) FILTRADO DE HIPERPARÁMETROS POR MODELO
+    RF_VALID = {
+        "n_estimators", "max_depth", "min_samples_split",
+        "min_samples_leaf", "max_features", "bootstrap",
+        "criterion", "random_state"
+    }
 
-    # Random Forest
-    X_train_scaled, X_test_scaled, _, _, _, _ = preprocessor(X_train, X_test)
-    with mlflow.start_run(run_name="Best Random Forest Regressor"):
+    XGB_VALID = {
+        "n_estimators", "max_depth", "learning_rate",
+        "subsample", "colsample_bytree", "gamma",
+        "lambda", "alpha"
+    }
+
+    LGBM_VALID = {
+        "num_leaves", "learning_rate", "n_estimators",
+        "min_child_samples", "subsample", "colsample_bytree",
+        "reg_lambda", "reg_alpha"
+    }
+
+    def filter_params(params, valid):
+        return {k: v for k, v in params.items() if k in valid}
+
+    best_params_rf   = filter_params(best_params_rf, RF_VALID)
+    best_params_xgb  = filter_params(best_params_xgb, XGB_VALID)
+    best_params_lgbm = filter_params(best_params_lgbm, LGBM_VALID)
+
+    print("RF params usados:", best_params_rf)
+    print("XGB params usados:", best_params_xgb)
+    print("LGBM params usados:", best_params_lgbm)
+
+    # 1) RANDOM FOREST REGRESSOR
+    mlflow.end_run()
+    with mlflow.start_run(run_name='Best Random Forest Regressor', nested=True):
+        
+        mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
+        mlflow.log_params(best_params_rf)
+
         model = RandomForestRegressor(**best_params_rf)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
-        mlflow.log_metric("rmse", float(np.sqrt(mean_squared_error(y_test, y_pred))))
-        mlflow.log_metric("mae", float(mean_absolute_error(y_test, y_pred)))
-        mlflow.log_metric("r2", float(r2_score(y_test, y_pred)))
-        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
-        mlflow.sklearn.log_model(model, artifact_path="model", signature=signature)
-        run_ids['rf'] = mlflow.active_run().info.run_id
 
-    # XGBoost
-    X_train_scaled, X_test_scaled, _, _, _, _ = preprocessor(X_train, X_test)
-    with mlflow.start_run(run_name="Best XGBoost Regressor"):
+        mlflow.log_metric("rmse", root_mean_squared_error(y_test, y_pred))
+        mlflow.log_metric("mae", mean_absolute_error(y_test, y_pred))
+        mlflow.log_metric("r2", r2_score(y_test, y_pred))
+
+        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
+        mlflow.sklearn.log_model(model, "model", signature=signature)
+
+    # 2) XGBOOST REGRESSOR
+    mlflow.end_run()
+    with mlflow.start_run(run_name='Best XGBoost Regressor', nested=True):
+        
+        mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
+
+        mlflow.log_params(best_params_xgb)
+
         model = xgb.XGBRegressor(objective='reg:squarederror', **best_params_xgb)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
-        mlflow.log_metric("rmse", float(np.sqrt(mean_squared_error(y_test, y_pred))))
-        mlflow.log_metric("mae", float(mean_absolute_error(y_test, y_pred)))
-        mlflow.log_metric("r2", float(r2_score(y_test, y_pred)))
-        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
-        mlflow.xgboost.log_model(model, artifact_path="model", signature=signature)
-        run_ids['xgb'] = mlflow.active_run().info.run_id
 
-    # LightGBM
-    X_train_scaled, X_test_scaled, _, _, _, _ = preprocessor(X_train, X_test)
-    with mlflow.start_run(run_name="Best LightGBM Regressor"):
+        mlflow.log_metric("rmse", root_mean_squared_error(y_test, y_pred))
+        mlflow.log_metric("mae", mean_absolute_error(y_test, y_pred))
+        mlflow.log_metric("r2", r2_score(y_test, y_pred))
+
+        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
+        mlflow.xgboost.log_model(model, "model", signature=signature)
+
+    # 3) LIGHTGBM REGRESSOR
+    mlflow.end_run()
+    with mlflow.start_run(run_name='Best LightGBM Regressor', nested=True):
+        
+        mlflow.log_artifact("artifacts/preprocessor/encoder.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/scaler.pkl", artifact_path="preprocessor")
+        mlflow.log_artifact("artifacts/preprocessor/feature_columns.pkl", artifact_path="preprocessor")
+
+        mlflow.log_params(best_params_lgbm)
+
         model = lgb.LGBMRegressor(**best_params_lgbm)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
-        mlflow.log_metric("rmse", float(np.sqrt(mean_squared_error(y_test, y_pred))))
-        mlflow.log_metric("mae", float(mean_absolute_error(y_test, y_pred)))
-        mlflow.log_metric("r2", float(r2_score(y_test, y_pred)))
-        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
-        mlflow.lightgbm.log_model(model, artifact_path="model", signature=signature)
-        run_ids['lgbm'] = mlflow.active_run().info.run_id
 
-    return run_ids['rf'], run_ids['xgb'], run_ids['lgbm']
+        mlflow.log_metric("rmse", root_mean_squared_error(y_test, y_pred))
+        mlflow.log_metric("mae", mean_absolute_error(y_test, y_pred))
+        mlflow.log_metric("r2", r2_score(y_test, y_pred))
+
+        signature = infer_signature(X_train_scaled, model.predict(X_train_scaled))
+        mlflow.lightgbm.log_model(model, "model", signature=signature)
 
 
 # --- REGISTER MODELS ---
@@ -286,7 +398,7 @@ def register_champion_challenger_reg(experiment_name: str, model_registry_name: 
 
     runs = mlflow.search_runs(
         experiment_names=[experiment_name],
-        filter_string="tags.candidate = 'true'",
+        filter_string="tags.best = 'true'",
         order_by=[f"metrics.{metric} {order}"]
     )
 
@@ -317,19 +429,23 @@ def register_champion_challenger_reg(experiment_name: str, model_registry_name: 
 def main_flow():
     load_dotenv(override=True)
     mlflow.set_tracking_uri("databricks")
-    EXPERIMENT_NAME = "/Users/aclarapao@gmail.com/proyecto-final-precios_prefect"
+    EXPERIMENT_NAME = "/Users/aclarapao@gmail.com/proyecto_final_precios_prefect3"
     mlflow.set_experiment(EXPERIMENT_NAME)
-    MODEL_REGISTRY_NAME = "workspace.default.proyecto_final_precios_prefect"
-    mlflow.sklearn.autolog()
+    MODEL_REGISTRY_NAME = "workspace.default.proyecto_final_precios_prefect3"
 
-    df = load_data("C:/Users/Clara/Documents/Semestre5/Proyecto_Final/Proyecto_Final/data/processed/df_clean.csv")
+    df = load_data("../data/processed/df_clean.csv")
     X_train, X_val, X_test, y_train, y_val, y_test = make_splits(df)
+    X_train_scaled, X_test_scaled, X_val_scaled, encoder, scaler, feature_cols = preprocessor(
+    X_train, X_test, X_val, save_data=True, save_artifacts=True)
 
-    best_rf = hp_tuning_rf(X_train, X_test, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=10)
-    best_xgb = hp_tuning_xgb(X_train, X_test, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=10)
-    best_lgbm = hp_tuning_lgbm(X_train, X_test, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=10)
+    mlflow.sklearn.autolog()
+    best_rf = hp_tuning_rf_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=2)
+    mlflow.sklearn.autolog()
+    best_xgb = hp_tuning_xgb_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=2)
+    mlflow.sklearn.autolog()
+    best_lgbm = hp_tuning_lgbm_reg(X_train_scaled, X_test_scaled, y_train, y_test, X_val=X_val, y_val=y_val, n_trials=2)
 
-    rf_run_id, xgb_run_id, lgbm_run_id = train_best_models(
+    train_best_models(
         X_train, y_train, X_test, y_test,
         best_params_rf=best_rf,
         best_params_xgb=best_xgb,

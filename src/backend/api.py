@@ -14,7 +14,7 @@ load_dotenv(override=True)  # Carga las variables del archivo .env
 mlflow.set_tracking_uri("databricks")
 client = MlflowClient()
 
-EXPERIMENT_NAME = "/Users/aclarapao@gmail.com/proyecto_final_precios_3"
+EXPERIMENT_NAME = "/Users/aclarapao@gmail.com/proyecto_final_precios_4"
 
 run_ = mlflow.search_runs(order_by=['metrics.r2 ASC'],
                           output_format="list",
@@ -33,10 +33,10 @@ with open("preprocessor/encoder.pkl", "rb") as f1_in:
     encoder = pickle.load(f1_in)
 with open("preprocessor/scaler.pkl", "rb") as f2_in:
     scaler = pickle.load(f2_in)
-with open("feature_columns.pkl", "rb") as f3_in:
+with open("preprocessor/feature_columns.pkl", "rb") as f3_in:
     feature_columns = pickle.load(f3_in)
 
-model_name = "workspace.default.proyecto_final_precios_3"
+model_name = "workspace.default.proyecto_final_precios_4"
 alias = "champion"
 
 model_uri = f"models:/{model_name}@{alias}"

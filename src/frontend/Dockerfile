@@ -1,0 +1,1 @@
+# no instalar hora en crear requirements gitrecs
