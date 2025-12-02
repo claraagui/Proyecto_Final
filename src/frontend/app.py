@@ -1,10 +1,14 @@
 import streamlit as st
 import requests
+import os
 
-# URL de tu endpoint FastAPI
-API_URL = "http://localhost:8000/predict"   # <-- cámbiala si tu API está en la nube
+# Detecta automáticamente el entorno (Docker o local)
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
-st.title(" Predicción de Precio – Streamlit + FastAPI")
+st.title("Predicción de Precio – Streamlit + FastAPI")
+
+# Muestra qué URL está usando (puedes quitar esto después)
+st.info(f"Conectado a: {API_URL}")
 
 st.write("Completa los valores y presiona Predecir para obtener el resultado del modelo.")
 
@@ -16,7 +20,7 @@ with st.form("input_form"):
     has_photo = st.selectbox("¿Tiene foto? (str)", ["yes", "no"])
     pets_allowed = st.selectbox("¿Mascotas permitidas? (float)", [0.0, 1.0])
     square_feet = st.number_input("Tamaño en pies cuadrados (int)", step=1)
-    cityname = st.text_input("Cityname (str)")   # tu modelo lo tiene como int pero quizá es str
+    cityname = st.text_input("Cityname (str)")
     state = st.text_input("State (str)")
     latitude = st.number_input("Latitud (float)", step=0.0001)
     longitude = st.number_input("Longitud (float)", step=0.0001)
@@ -41,11 +45,12 @@ if submit:
 
     with st.spinner("Calculando predicción..."):
         try:
-            response = requests.post(API_URL, json=payload)
+            # Usa API_URL sin el /predict
+            response = requests.post(f"{API_URL}/predict", json=payload)
 
             if response.status_code == 200:
                 pred = response.json()["prediction"]
-                st.success(f"🎯 *Predicción del modelo: {pred}*")
+                st.success(f"**Predicción del modelo: ${pred:,.2f}**")
             else:
                 st.error(f"Error en el servidor: {response.text}")
 

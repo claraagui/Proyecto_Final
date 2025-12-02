@@ -1,0 +1,36 @@
+name: proyecto-final-app
+
+services:
+  # 🧠 Servicio de Backend (API - FastAPI)
+  api:
+    build:
+      context: ./src/backend
+      dockerfile: Dockerfile
+    container_name: proyecto-final-api-container
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./.env
+    networks:
+      - app-network
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+
+  # 🧩 Servicio de Frontend (UI - Streamlit)
+  ui:
+    build:
+      context: ./src/frontend
+      dockerfile: Dockerfile
+    container_name: proyecto-final-ui-container
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    networks:
+      - app-network
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+
+networks:
+  app-network:
+    driver: bridge
