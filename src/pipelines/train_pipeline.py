@@ -35,14 +35,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
-# Evaluation Metrics
 from sklearn.metrics import accuracy_score, precision_score, f1_score, recall_score
 
 from sklearn.ensemble import RandomForestRegressor
 import xgboost as xgb
 import lightgbm as lgb
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
-# safe_databricks_setup.py
+
 from dotenv import load_dotenv
 import os
 import mlflow
@@ -71,7 +70,7 @@ def preprocessor(
     X_val: Optional[pd.DataFrame] = None,
     save_data: bool = False,
     save_artifacts: bool = True,
-    artifacts_dir: str = "../../artifacts/preprocessor"
+    artifacts_dir: str = "../artifacts/preprocessor"
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], OneHotEncoder, StandardScaler, List[str]]:
 
     X_train = X_train.copy()
@@ -136,10 +135,7 @@ def preprocessor(
 
     return X_train_scaled, X_test_scaled, X_val_scaled, encoder, scaler, list(X_train_final.columns)
 
-
-# ---------------------------
 # ---- HYPERPARAM TUNING ----
-# ---------------------------
 
 @task(name="HP Tuning RF")
 def hp_tuning_rf(X_train, X_test, y_train, y_test, X_val=None, y_val=None, n_trials=10):
@@ -237,6 +233,7 @@ def train_best_models(
     X_train, y_train, X_test, y_test,
     best_params_rf, best_params_xgb, best_params_lgbm
 ):
+    mlflow.end_run()
     run_ids = {}
 
     # Random Forest
